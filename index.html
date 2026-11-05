@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Margao, Goa in 3D</title>
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/cesium@1.119.0/Build/Cesium/Widgets/widgets.css"
+      onerror="this.onerror=null;this.href='https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Widgets/widgets.css'">
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.119.0/Build/Cesium/Cesium.js"></script>
+<script>window.Cesium || document.write('<script src="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Cesium.js"><\/script>');</script>
+<style>
+  :root {
+    --ink: #0e2b30;
+    --paper: #f3f6f4;
+    --sand: #f1e3c0;
+    --mint: #6fd3b0;
+    --warn: #ffb4a2;
+  }
+  html, body { margin: 0; height: 100%; background: var(--ink); }
+  #cesiumContainer { position: absolute; inset: 0; }
+
+  .panel {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    width: 260px; box-sizing: border-box; padding: 18px 18px 14px;
+    color: var(--paper); background: rgba(14, 43, 48, .82);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    border: 1px solid rgba(243, 246, 244, .16); border-radius: 14px;
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .panel h1 {
+    margin: 0; font: 600 30px/1.1 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    letter-spacing: .01em;
+  }
+  .panel .where { margin: 4px 0 16px; font-size: 13px; opacity: .72; }
+
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px;
+         background: rgba(0, 0, 0, .28); border-radius: 10px; }
+  .seg button {
+    padding: 8px 0; border: 0; border-radius: 7px; cursor: pointer;
+    font: inherit; font-weight: 600; color: var(--paper); background: transparent;
+    transition: background .18s, color .18s;
+  }
+  .seg button[aria-pressed="true"] { background: var(--sand); color: var(--ink); }
+  .seg button:not([aria-pressed="true"]):hover { background: rgba(243, 246, 244, .12); }
+
+  .reset {
+    margin-top: 10px; width: 100%; padding: 8px 0; cursor: pointer; font: inherit;
+    color: var(--paper); background: transparent;
+    border: 1px solid rgba(243, 246, 244, .28); border-radius: 8px;
+  }
+  .reset:hover { background: rgba(243, 246, 244, .1); }
+  button:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+
+  #status { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0 0; font-size: 12.5px; opacity: .85; }
+  #status::before { content: ""; flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: #e0b84f; }
+  #status.ready::before { background: var(--mint); }
+  #status.error { color: var(--warn); opacity: 1; }
+  #status.error::before { background: var(--warn); }
+
+  @media (max-width: 480px) { .panel { width: calc(100% - 32px); } }
+  @media (prefers-reduced-motion: reduce) { .seg button { transition: none; } }
+</style>
+</head>
+<body>
+<div id="cesiumContainer"></div>
+
+<aside class="panel" aria-label="Map controls">
+  <h1>Margao</h1>
+  <p class="where">Salcete, Goa. 15.2736 N, 73.9582 E</p>
+
+  <div class="seg" role="group" aria-label="Base map">
+    <button id="btnSat" type="button" aria-pressed="true">Satellite</button>
+    <button id="btnStd" type="button" aria-pressed="false">Standard</button>
+  </div>
+  <button id="btnReset" class="reset" type="button">Reset view</button>
+
+  <p id="status" role="status">Loading terrain and buildings</p>
+</aside>
+
+<script>
+  // Free token: https://ion.cesium.com/tokens  (needed for terrain and OSM Buildings)
+  const ION_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6InlIa1JoZHFDTlREd212cmYiLCJqdGkiOiJjMThkM2UyMy03OGI1LTRmNzEtYmFkMS04MGNkNGFhYWIwZmIiLCJpZCI6NTQzMDUxLCJzdWIiOiJhbWV5aGVnZGUiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoiVW50aXRsZWQiLCJpYXQiOjE3OTM4Njg1NjJ9.qWEi_VcYLw0UXrW7U9AOshcXDBHQhF7Z4BlWooMKTVk";
+
+  const MARGAO = { lat: 15.2736, lon: 73.9582 };
+  const TILT_DEG = 45;      // camera looks 45 degrees below the horizon
+  const HEADING_DEG = 0;    // facing north
+  const RANGE_M = 1600;     // distance from camera to the point it looks at
+
+  const statusEl = document.getElementById("status");
+  function setStatus(text, state) {
+    statusEl.textContent = text;
+    statusEl.className = state || "";
+  }
+
+  if (typeof Cesium === "undefined") {
+    setStatus("CesiumJS did not load. Open this file in a regular browser with internet access (jsdelivr.net and cesium.com must be reachable).", "error");
+    throw new Error("CesiumJS failed to load from both CDNs");
+  }
+
+  if (ION_TOKEN && !ION_TOKEN.startsWith("YOUR_")) {
+    Cesium.Ion.defaultAccessToken = ION_TOKEN;
+  }
+
+  const withTimeout = (p, ms, label) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + " timed out after " + ms / 1000 + " s")), ms))
+  ]);
+
+  // Tells you exactly why Cesium ion requests fail: network, token, or asset access.
+  async function diagnoseIon() {
+    const assets = { 1: "World Terrain", 96188: "OSM Buildings" };
+    const problems = new Set();
+    for (const id of Object.keys(assets)) {
+      try {
+        const r = await fetch("https://api.cesium.com/v1/assets/" + id + "/endpoint?access_token=" + encodeURIComponent(ION_TOKEN));
+        if (r.status === 401) problems.add("Cesium ion rejected the token (401). Copy it again from ion.cesium.com/tokens.");
+        else if (r.status === 403 || r.status === 404) problems.add(assets[id] + ": the token has no access. Add the asset in the Asset Depot and allow it on the token.");
+        else if (!r.ok) problems.add(assets[id] + ": Cesium ion returned HTTP " + r.status + ".");
+      } catch (e) {
+        return "Cannot reach api.cesium.com. Open the file in a normal browser tab (not a preview pane) and check your internet, VPN, firewall or ad blocker.";
+      }
+    }
+    return [...problems].join(" ");
+  }
+
+  async function main() {
+    const problem = await diagnoseIon();
+    let hadError = !!problem, buildingsOk = false, flatGround = false;
+    const fail = (msg) => { console.warn(msg); if (!hadError) { hadError = true; setStatus(msg, "error"); } };
+    if (problem) setStatus(problem, "error");
+
+    // Terrain. Building terrain meshes needs a web worker, which some browser contexts (for example a
+    // page opened from a local file on a phone) block. Test that first; if it is blocked, use flat ground.
+    let worldTerrain = null;
+    let terrainProvider = new Cesium.EllipsoidTerrainProvider();
+    try {
+      worldTerrain = await Cesium.createWorldTerrainAsync();
+      const tile = await withTimeout(worldTerrain.requestTileGeometry(0, 0, 0), 20000, "Terrain download");
+      if (tile) {
+        await withTimeout(
+          tile.createMesh({ tilingScheme: worldTerrain.tilingScheme, x: 0, y: 0, level: 0, throttle: false }),
+          8000, "Terrain mesh worker"
+        );
+      }
+      terrainProvider = worldTerrain;
+    } catch (e) {
+      console.warn("Terrain check failed:", e);
+      flatGround = true;
+      fail("This browser blocks the web workers Cesium needs, which happens when a page is opened as a local file. Serve the file over https:// or http://localhost instead.");
+    }
+
+    const viewer = new Cesium.Viewer("cesiumContainer", {
+      terrainProvider,
+      baseLayer: false,            // we add and toggle our own layers
+      baseLayerPicker: false, geocoder: false, homeButton: false,
+      sceneModePicker: false, navigationHelpButton: false, fullscreenButton: false,
+      animation: false, timeline: false, infoBox: false, selectionIndicator: false
+    });
+
+    viewer.scene.globe.depthTestAgainstTerrain = true;
+    // A visible ground colour, so missing imagery is obvious instead of showing empty space.
+    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#2b4a3f");
+    // Fix the clock to mid-afternoon in Goa (15:00 IST) so buildings are lit from the side.
+    viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-11-05T09:30:00Z");
+    viewer.clock.shouldAnimate = false;
+
+    // Base map layers: both exist, only one is visible. Both providers are ready immediately.
+    const satellite = new Cesium.ImageryLayer(
+      new Cesium.UrlTemplateImageryProvider({
+        url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        maximumLevel: 19,
+        credit: "Imagery © Esri, Maxar, Earthstar Geographics"
+      })
+    );
+    const standard = new Cesium.ImageryLayer(
+      new Cesium.UrlTemplateImageryProvider({
+        url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+        subdomains: ["a", "b", "c", "d"],
+        maximumLevel: 19,
+        credit: "© OpenStreetMap contributors © CARTO"
+      })
+    );
+    standard.show = false;
+    viewer.imageryLayers.add(satellite);
+    viewer.imageryLayers.add(standard);
+
+    const btnSat = document.getElementById("btnSat");
+    const btnStd = document.getElementById("btnStd");
+    function setBaseMap(mode) {
+      satellite.show = mode === "satellite";
+      standard.show = mode === "standard";
+      btnSat.setAttribute("aria-pressed", String(mode === "satellite"));
+      btnStd.setAttribute("aria-pressed", String(mode === "standard"));
+    }
+    btnSat.addEventListener("click", () => setBaseMap("satellite"));
+    btnStd.addEventListener("click", () => setBaseMap("standard"));
+
+    // Surface tile problems in the panel (useful on a phone, where there is no console).
+    const tileError = (label) => (err) =>
+      fail(label + " tiles failed to load: " + (err && err.message ? err.message : "network error"));
+    terrainProvider.errorEvent.addEventListener(tileError("Terrain"));
+    satellite.imageryProvider.errorEvent.addEventListener(tileError("Satellite"));
+    standard.imageryProvider.errorEvent.addEventListener(tileError("Standard map"));
+
+    let pendingTiles = 0;
+    function refreshStatus() {
+      if (hadError) return;
+      if (!buildingsOk) setStatus("Loading 3D buildings");
+      else if (pendingTiles > 0 || !viewer.scene.globe.tilesLoaded)
+        setStatus("Loading map tiles" + (pendingTiles > 0 ? " (" + pendingTiles + " left)" : ""));
+      else setStatus("Map and 3D buildings loaded" + (flatGround ? ". Flat ground: this browser blocks the terrain worker." : ""), "ready");
+    }
+    viewer.scene.globe.tileLoadProgressEvent.addEventListener((n) => { pendingTiles = n; refreshStatus(); });
+    setInterval(refreshStatus, 500);
+
+    // Ground height at Margao (metres above the WGS84 ellipsoid). Sampling needs no worker.
+    // If it cannot be sampled, ~-50 m is a rough value for Goa (sea level sits about 65 m below the ellipsoid there).
+    let groundHeight = flatGround ? -50 : 20;
+    if (worldTerrain) {
+      try {
+        const [p] = await withTimeout(Cesium.sampleTerrainMostDetailed(
+          worldTerrain, [Cesium.Cartographic.fromDegrees(MARGAO.lon, MARGAO.lat)]), 15000, "Terrain sampling");
+        if (Number.isFinite(p.height)) groundHeight = p.height;
+      } catch (e) { console.warn(e); }
+    }
+
+    function flyHome(duration) {
+      const target = Cesium.Cartesian3.fromDegrees(MARGAO.lon, MARGAO.lat, flatGround ? 0 : groundHeight);
+      viewer.camera.flyToBoundingSphere(new Cesium.BoundingSphere(target, 1), {
+        offset: new Cesium.HeadingPitchRange(
+          Cesium.Math.toRadians(HEADING_DEG), Cesium.Math.toRadians(-TILT_DEG), RANGE_M
+        ),
+        duration
+      });
+    }
+    document.getElementById("btnReset").addEventListener("click", () => flyHome(1.5));
+    flyHome(3);
+
+    // Cesium OSM Buildings: every footprint in OpenStreetMap is extruded to 3D.
+    try {
+      const buildings = await Cesium.createOsmBuildingsAsync();
+      if (flatGround) {
+        // The buildings are placed for real terrain. On flat ground, lift them by the terrain height so they sit on it.
+        const up = Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(
+          Cesium.Cartesian3.fromDegrees(MARGAO.lon, MARGAO.lat), new Cesium.Cartesian3());
+        buildings.modelMatrix = Cesium.Matrix4.fromTranslation(
+          Cesium.Cartesian3.multiplyByScalar(up, -groundHeight, new Cesium.Cartesian3()));
+      }
+      viewer.scene.primitives.add(buildings);
+      buildingsOk = true;
+      refreshStatus();
+    } catch (e) {
+      console.error(e);
+      fail("Could not load 3D buildings: " + (e.message || e));
+    }
+  }
+
+  main().catch((e) => {
+    console.error(e);
+    setStatus("Could not start the map: " + (e.message || e), "error");
+  });
+</script>
+</body>
+</html>
