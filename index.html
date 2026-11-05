@@ -237,11 +237,20 @@
     btnStd.addEventListener("click", () => setBaseMap("standard"));
 
     // Surface tile problems in the panel (useful on a phone, where there is no console).
-    const tileError = (label) => (err) =>
-      fail(label + " tiles failed to load: " + (err && err.message ? err.message : "network error"));
-    terrainProvider.errorEvent.addEventListener(tileError("Terrain"));
-    satellite.imageryProvider.errorEvent.addEventListener(tileError("Satellite"));
-    standard.imageryProvider.errorEvent.addEventListener(tileError("Standard map"));
+    // Map servers often have no tiles at the very highest zooms, and Cesium simply keeps showing
+    // the lower-zoom picture for those. So a few missing imagery tiles are only logged; the panel
+    // reports an error when a visible layer keeps failing. Terrain failures are reported at once.
+    const tileError = (label, layer, limit) => {
+      let count = 0;
+      return (err) => {
+        console.warn(label + " tile error:", err && err.message);
+        if (layer && !layer.show) return;
+        if (++count >= limit) fail(label + " tiles keep failing to load. Check your connection, VPN or ad blocker.");
+      };
+    };
+    terrainProvider.errorEvent.addEventListener(tileError("Terrain", null, 1));
+    satellite.imageryProvider.errorEvent.addEventListener(tileError("Satellite", satellite, 12));
+    standard.imageryProvider.errorEvent.addEventListener(tileError("Standard map", standard, 12));
 
     let pendingTiles = 0;
     function refreshStatus() {
