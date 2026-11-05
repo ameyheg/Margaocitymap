@@ -215,9 +215,10 @@
       })
     );
     const standard = new Cesium.ImageryLayer(
-      new Cesium.OpenStreetMapImageryProvider({
-        url: "https://tile.openstreetmap.org/",
-        credit: "© OpenStreetMap contributors"
+      new Cesium.UrlTemplateImageryProvider({
+        url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        maximumLevel: 19,
+        credit: "Map © Esri, HERE, Garmin, OpenStreetMap contributors"
       })
     );
     standard.show = false;
