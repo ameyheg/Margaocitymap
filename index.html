@@ -173,11 +173,9 @@
       })
     );
     const standard = new Cesium.ImageryLayer(
-      new Cesium.UrlTemplateImageryProvider({
-        url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
-        subdomains: ["a", "b", "c", "d"],
-        maximumLevel: 19,
-        credit: "© OpenStreetMap contributors © CARTO"
+      new Cesium.OpenStreetMapImageryProvider({
+        url: "https://tile.openstreetmap.org/",
+        credit: "© OpenStreetMap contributors"
       })
     );
     standard.show = false;
