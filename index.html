@@ -58,6 +58,35 @@
   #status.error { color: var(--warn); opacity: 1; }
   #status.error::before { background: var(--warn); }
 
+  .walk {
+    margin-top: 12px; width: 100%; padding: 9px 0; cursor: pointer; font: inherit; font-weight: 600;
+    color: var(--ink); background: var(--sand); border: 0; border-radius: 8px;
+  }
+  .walk[aria-pressed="true"] { background: var(--mint); }
+  .tip { margin: 10px 0 0; font-size: 12px; opacity: .65; }
+
+  .hud {
+    position: absolute; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 10; display: none;
+    max-width: calc(100% - 32px); box-sizing: border-box; padding: 8px 16px; border-radius: 999px;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; text-align: center;
+    color: var(--paper); background: rgba(14, 43, 48, .82);
+    border: 1px solid rgba(243, 246, 244, .16);
+  }
+  body.walking .hud { display: block; }
+  .hud .tc { display: none; }
+  .pad {
+    position: absolute; right: 20px; bottom: 24px; z-index: 10; display: none;
+    grid-template: repeat(2, 56px) / repeat(3, 56px); gap: 6px;
+  }
+  .pad button {
+    font-size: 20px; color: var(--paper); background: rgba(14, 43, 48, .7);
+    border: 1px solid rgba(243, 246, 244, .25); border-radius: 12px; touch-action: none;
+  }
+  @media (pointer: coarse) {
+    body.walking .pad { display: grid; }
+    .hud .kb { display: none; } .hud .tc { display: inline; }
+    .hud { bottom: 140px; }
+  }
   @media (max-width: 480px) { .panel { width: calc(100% - 32px); } }
   @media (prefers-reduced-motion: reduce) { .seg button { transition: none; } }
 </style>
@@ -73,10 +102,23 @@
     <button id="btnSat" type="button" aria-pressed="true">Satellite</button>
     <button id="btnStd" type="button" aria-pressed="false">Standard</button>
   </div>
+  <button id="btnWalk" class="walk" type="button" aria-pressed="false">Walk through the city</button>
   <button id="btnReset" class="reset" type="button">Reset view</button>
+  <p class="tip">Point the centre of the screen at a street, then press Walk. You drop in right there.</p>
 
   <p id="status" role="status">Loading terrain and buildings</p>
 </aside>
+
+<div class="hud" role="note">
+  <span class="kb">W A S D move &middot; drag to look &middot; Shift run &middot; C collisions <b id="colState">on</b> &middot; Esc exit</span>
+  <span class="tc">Drag to look. Use the arrows to move.</span>
+</div>
+<div class="pad" aria-label="Walk controls">
+  <button type="button" data-a="f" style="grid-area:1/2" aria-label="Forward">&#9650;</button>
+  <button type="button" data-a="l" style="grid-area:2/1" aria-label="Step left">&#9664;</button>
+  <button type="button" data-a="b" style="grid-area:2/2" aria-label="Back">&#9660;</button>
+  <button type="button" data-a="r" style="grid-area:2/3" aria-label="Step right">&#9654;</button>
+</div>
 
 <script>
   // Free token: https://ion.cesium.com/tokens  (needed for terrain and OSM Buildings)
@@ -233,6 +275,131 @@
     }
     document.getElementById("btnReset").addEventListener("click", () => flyHome(1.5));
     flyHome(3);
+
+    // ---------- Walk mode (first person) ----------
+    const EYE_M = 1.7, WALK_MS = 4, RUN_MS = 11, EARTH_R = 6378137;
+    const walk = { on: false, lon: 0, lat: 0, h: 0, heading: 0, pitch: 0, collide: true, last: 0 };
+    const held = new Set();
+    const KEYS = { KeyW: "f", ArrowUp: "f", KeyS: "b", ArrowDown: "b", KeyA: "l", KeyD: "r", ArrowLeft: "tl", ArrowRight: "tr" };
+    const btnWalk = document.getElementById("btnWalk");
+    const colState = document.getElementById("colState");
+    const camCtl = viewer.scene.screenSpaceCameraController;
+
+    function startWalk() {
+      const cam = viewer.camera, cv = viewer.canvas;
+      cam.cancelFlight();
+      // Drop in where the centre of the screen touches the ground.
+      const ray = cam.getPickRay(new Cesium.Cartesian2(cv.clientWidth / 2, cv.clientHeight / 2));
+      const hit = ray && viewer.scene.globe.pick(ray, viewer.scene);
+      const c = hit ? Cesium.Cartographic.fromCartesian(hit)
+                    : Cesium.Cartographic.fromDegrees(MARGAO.lon, MARGAO.lat, groundHeight);
+      Object.assign(walk, { on: true, lon: c.longitude, lat: c.latitude, h: c.height,
+                            heading: cam.heading, pitch: 0, last: performance.now() });
+      camCtl.enableInputs = false;      // stop the default orbit/zoom controls
+      cam.frustum.near = 0.1;           // see walls up close
+      document.body.classList.add("walking");
+      btnWalk.setAttribute("aria-pressed", "true");
+      btnWalk.textContent = "Back to aerial view";
+    }
+
+    function stopWalk(fly) {
+      walk.on = false; held.clear();
+      camCtl.enableInputs = true;
+      viewer.camera.frustum.near = 1.0;
+      document.body.classList.remove("walking");
+      btnWalk.setAttribute("aria-pressed", "false");
+      btnWalk.textContent = "Walk through the city";
+      if (fly !== false) {   // rise to an aerial view above where you were standing
+        viewer.camera.flyToBoundingSphere(
+          new Cesium.BoundingSphere(Cesium.Cartesian3.fromRadians(walk.lon, walk.lat, walk.h), 1),
+          { offset: new Cesium.HeadingPitchRange(walk.heading, Cesium.Math.toRadians(-TILT_DEG), 600), duration: 1.5 });
+      }
+    }
+
+    // Cast a ray at chest height in the travel direction; true if a building is right ahead.
+    function blocked(angle, step) {
+      if (!walk.collide) return false;
+      try {
+        const o = Cesium.Cartesian3.fromRadians(walk.lon, walk.lat, walk.h + 1.0);
+        const enu = Cesium.Transforms.eastNorthUpToFixedFrame(o);
+        const d = Cesium.Matrix4.multiplyByPointAsVector(
+          enu, new Cesium.Cartesian3(Math.sin(angle), Math.cos(angle), 0), new Cesium.Cartesian3());
+        const hit = viewer.scene.pickFromRay(new Cesium.Ray(o, d));
+        return !!hit && !!hit.position && Cesium.Cartesian3.distance(o, hit.position) < step + 0.8;
+      } catch (e) { return false; }
+    }
+
+    viewer.scene.preRender.addEventListener(() => {
+      if (!walk.on) return;
+      const now = performance.now(), dt = Math.min((now - walk.last) / 1000, 0.1);
+      walk.last = now;
+
+      walk.heading += ((held.has("tr") ? 1 : 0) - (held.has("tl") ? 1 : 0)) * 1.5 * dt;
+      const fwd = (held.has("f") ? 1 : 0) - (held.has("b") ? 1 : 0);
+      const side = (held.has("r") ? 1 : 0) - (held.has("l") ? 1 : 0);
+      if (fwd || side) {
+        const step = (held.has("run") ? RUN_MS : WALK_MS) * dt;
+        const a = walk.heading + Math.atan2(side, fwd);          // direction of travel
+        if (!blocked(a, step)) {
+          walk.lat += Math.cos(a) * step / EARTH_R;
+          walk.lon += Math.sin(a) * step / (EARTH_R * Math.cos(walk.lat));
+        }
+      }
+      // Stay on the ground: follow the terrain height under the feet.
+      const g = viewer.scene.globe.getHeight(new Cesium.Cartographic(walk.lon, walk.lat));
+      if (Number.isFinite(g)) walk.h += (g - walk.h) * Math.min(1, dt * 15);
+
+      viewer.camera.setView({
+        destination: Cesium.Cartesian3.fromRadians(walk.lon, walk.lat, walk.h + EYE_M),
+        orientation: { heading: walk.heading, pitch: walk.pitch, roll: 0 }
+      });
+    });
+
+    // Drag to look (mouse and touch).
+    let drag = null;
+    const cv = viewer.canvas;
+    cv.style.touchAction = "none";
+    cv.addEventListener("pointerdown", (e) => {
+      if (!walk.on) return;
+      drag = { x: e.clientX, y: e.clientY };
+      cv.setPointerCapture(e.pointerId);
+    });
+    cv.addEventListener("pointermove", (e) => {
+      if (!drag || !walk.on) return;
+      walk.heading += (e.clientX - drag.x) * 0.004;
+      walk.pitch = Math.max(-1.4, Math.min(1.4, walk.pitch - (e.clientY - drag.y) * 0.004));
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    ["pointerup", "pointercancel"].forEach((t) => cv.addEventListener(t, () => { drag = null; }));
+
+    // Keyboard.
+    window.addEventListener("keydown", (e) => {
+      if (!walk.on) return;
+      if (e.code === "Escape") { stopWalk(); return; }
+      if (e.code === "KeyC" && !e.repeat) {
+        walk.collide = !walk.collide;
+        colState.textContent = walk.collide ? "on" : "off";
+        return;
+      }
+      if (e.key === "Shift") held.add("run");
+      if (KEYS[e.code]) { held.add(KEYS[e.code]); e.preventDefault(); }
+    });
+    window.addEventListener("keyup", (e) => {
+      if (e.key === "Shift") held.delete("run");
+      if (KEYS[e.code]) held.delete(KEYS[e.code]);
+    });
+    window.addEventListener("blur", () => held.clear());
+
+    // On-screen arrows for phones.
+    document.querySelectorAll(".pad button").forEach((b) => {
+      const a = b.dataset.a;
+      b.addEventListener("pointerdown", (e) => { held.add(a); b.setPointerCapture(e.pointerId); });
+      ["pointerup", "pointercancel"].forEach((t) => b.addEventListener(t, () => held.delete(a)));
+    });
+
+    btnWalk.addEventListener("click", () => { if (walk.on) stopWalk(); else startWalk(); });
+    // "Reset view" runs its own flight first; just leave walk mode without a second one.
+    document.getElementById("btnReset").addEventListener("click", () => { if (walk.on) stopWalk(false); });
 
     // Cesium OSM Buildings: every footprint in OpenStreetMap is extruded to 3D.
     try {
